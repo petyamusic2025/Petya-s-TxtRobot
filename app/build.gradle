@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+def runNo = (System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger()
+
+android {
+    namespace 'hu.petya.txtrobot'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'hu.petya.txtrobot'
+        minSdk 26
+        targetSdk 34
+        versionCode runNo
+        versionName "1.0.${runNo}"
+    }
+
+    signingConfigs {
+        release {
+            storeFile rootProject.file('release.keystore')
+            storePassword 'txtrobot'
+            keyAlias 'txtrobot'
+            keyPassword 'txtrobot'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+        debug {
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
