@@ -150,7 +150,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const QUICK = !!A.isQuick();
 
 // ------------------------------------------------------------ Beállítások
-const DEF = { baseFolder:'Dalszövegek', nameFormat:'artistTitle', subfolder:true, autoTranslit:false, titleLine:false, delay:1.5 };
+const DEF = { baseFolder:'Dalszövegek', nameFormat:'artistTitle', subfolder:true, autoTranslit:false, titleLine:false, delay:3 };
 let S = loadSettings();
 function loadSettings(){
   const s = Object.assign({}, DEF);
@@ -317,7 +317,7 @@ function getPageLinks(doc, pageUrl){
 }
 
 function pageTitle(doc){
-  const h1 = doc.querySelector('h1');
+  const h1 = doc.querySelector('h1') || doc.querySelector('[class*="lyricCapt" i],[class*="caption" i]');
   let t = h1 ? clean(h1.textContent) : '';
   if (!t){
     const og = doc.querySelector('meta[property="og:title"]');
@@ -332,18 +332,65 @@ const JUNK_SEL = '[class*="comment" i],[id*="comment" i],[class*="komentar" i],[
 const KW = /(lyric|tekst|text|pesm|pjesm|song|stih|szoveg|szöveg|content|entry|body)/i;
 const JUNK_LINE = /^(tekst pesme|tekst pjesme|reklama|advertisement|sponzorisano|oglas|ads?|lyrics|podeli|podijeli|share|print|štampaj|stampaj|komentari?|ocena|ocjena|pregleda:?\s*\d*|\(\s*\)|ucitavanje|učitavanje)\.?:?$/i;
 
+function nodeToText(el){
+  let out = '';
+  const BLOCK = /^(P|DIV|LI|H[1-6]|TR|SECTION|ARTICLE|BLOCKQUOTE|PRE|TABLE|DL|DD|DT)$/;
+  (function walk(n){
+    for (const c of n.childNodes){
+      if (c.nodeType === 3) out += c.textContent.replace(/[\t\r\n ]+/g, ' ');
+      else if (c.nodeType === 1){
+        if (c.nodeName === 'BR'){ out += '\n'; continue; }
+        if (/^(H[1-6]|SCRIPT|STYLE|BUTTON|FORM|SELECT|INPUT|TEXTAREA|IMG|IFRAME|INS|SVG)$/.test(c.nodeName)) continue;
+        const blk = BLOCK.test(c.nodeName);
+        if (blk) out += '\n';
+        if (c.nodeName === 'PRE') out += c.textContent; else walk(c);
+        if (blk) out += (c.nodeName === 'P' ? '\n\n' : '\n');
+      }
+    }
+  })(el);
+  return out;
+}
+function finishText(raw){
+  const lines = tidy(raw).split('\n').filter(l => !JUNK_LINE.test(l) && !/https?:\/\/|www\.[a-z]/i.test(l));
+  const text = tidy(lines.join('\n'));
+  return { text, lines: text ? text.split('\n').filter(l => l.trim()).length : 0 };
+}
+const LYRIC_SEL = '.lyric,.lyrics,#lyric,#lyrics,.song-lyrics,.songtext,[class*="lyric" i],[id*="lyric" i],[class*="tekst" i],[id*="tekst" i],[class*="songtext" i],[class*="stihovi" i]';
+function lineCount(el){
+  return el.querySelectorAll('br').length + el.querySelectorAll('p,div,li').length + 1;
+}
+function linkRatio(el){
+  const all = clean(el.textContent).length || 1;
+  let l = 0; el.querySelectorAll('a').forEach(a => l += clean(a.textContent).length);
+  return l / all;
+}
+
 function extractLyrics(doc){
   const body = doc.body; if (!body) return { text: '', lines: 0 };
   const total = (body.textContent || '').length || 1;
-  doc.querySelectorAll(REMOVE_SEL).forEach(e => e.remove());
+  const bigEnough = e => (e.textContent || '').length >= total * 0.5;   // ha a fél oldalt tartalmazza, nem töröljük
+
+  // 1) Kifejezetten dalszövegnek jelölt elemek (pl. <p class="lyric">) – ezek elsőbbséget kapnak
+  const marked = [...body.querySelectorAll(LYRIC_SEL)].filter(e =>
+    !/^(H[1-6]|A|UL|OL|SCRIPT|STYLE|FORM|INPUT|TEXTAREA|BUTTON|IMG)$/.test(e.tagName) &&
+    !/(capt|title|naslov|summary|opis|comment|komentar|related|share|count|info|meta|author|autor|video)/i.test((e.id || '') + ' ' + (typeof e.className === 'string' ? e.className : '')) &&
+    clean(e.textContent).length >= 40 && lineCount(e) >= 3 && linkRatio(e) < 0.25);
+  const topMarked = marked.filter(e => !marked.some(o => o !== e && o.contains(e)));
+  if (topMarked.length){
+    const r = finishText(topMarked.map(nodeToText).join('\n\n'));
+    if (r.lines >= 3) return r;
+  }
+
+  // 2) Általános keresés: a legtöbb rövid sort tartalmazó blokk
+  doc.querySelectorAll(REMOVE_SEL).forEach(e => { if (!bigEnough(e)) e.remove(); });
   doc.querySelectorAll(JUNK_SEL).forEach(e => {
     if (e === body || e === doc.documentElement || e.tagName === 'MAIN') return;
-    if ((e.textContent || '').length < total * 0.5) e.remove();
+    if (!bigEnough(e)) e.remove();
   });
 
   let best = null, bestScore = 0;
   for (const el of body.querySelectorAll('*')){
-    if (el.tagName === 'A' || el.tagName === 'UL' || el.tagName === 'OL') continue;
+    if (/^(A|UL|OL|FORM|SCRIPT|STYLE)$/.test(el.tagName)) continue;
     let brs = 0, lines = 0, textLen = 0, linkLen = 0;
     for (const n of el.childNodes){
       if (n.nodeType === 3){ const t = n.textContent.trim(); if (t){ textLen += t.length; lines++; } }
@@ -369,28 +416,9 @@ function extractLyrics(doc){
   for (let k = 0; k < 2; k++){
     const p = best.parentElement; if (!p || p === body) break;
     const sib = [...p.children].filter(c => c.tagName === best.tagName && clean(c.textContent).length > 15);
-    if (sib.length >= 2 && !p.querySelector('ul,ol,table')) best = p; else break;
+    if (sib.length >= 2 && !p.querySelector('ul,ol,table') && linkRatio(p) < 0.2) best = p; else break;
   }
-
-  let out = '';
-  const BLOCK = /^(P|DIV|LI|H[1-6]|TR|SECTION|ARTICLE|BLOCKQUOTE|PRE|TABLE|DL|DD|DT)$/;
-  (function walk(n){
-    for (const c of n.childNodes){
-      if (c.nodeType === 3) out += c.textContent.replace(/[\t\r\n ]+/g, ' ');
-      else if (c.nodeType === 1){
-        if (c.nodeName === 'BR'){ out += '\n'; continue; }
-        if (/^(H[1-6])$/.test(c.nodeName)) continue;        // fejlécek (cím, "Tekst pesme") kimaradnak
-        const blk = BLOCK.test(c.nodeName);
-        if (blk) out += '\n';
-        if (c.nodeName === 'PRE') out += c.textContent; else walk(c);
-        if (blk) out += (c.nodeName === 'P' ? '\n\n' : '\n');
-      }
-    }
-  })(best);
-
-  const lines = tidy(out).split('\n').filter(l => !JUNK_LINE.test(l) && !/https?:\/\/|www\.[a-z]/i.test(l));
-  const text = tidy(lines.join('\n'));
-  return { text, lines: text.split('\n').filter(l => l.trim()).length };
+  return finishText(nodeToText(best));
 }
 
 function songTitleFromLink(text, artist){
