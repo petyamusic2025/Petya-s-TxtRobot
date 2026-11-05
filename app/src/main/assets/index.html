@@ -56,6 +56,10 @@ ul#songList li.fail label{color:var(--bad)}
 .pill{display:inline-block;background:#eef0f7;color:var(--brand);border-radius:999px;padding:2px 10px;font-size:12px;margin-left:6px}
 .help p{margin:6px 0;font-size:14px;color:var(--muted)}
 .help b{color:var(--ink)}
+.cand{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:10px}
+.cand pre{margin:0;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;max-height:170px;overflow:hidden;color:var(--ink)}
+.cand .meta{font-size:12px;color:var(--muted);margin:6px 0}
+.cand button{width:100%;margin-top:6px}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1b2236;color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;z-index:20;max-width:90vw}
 </style>
 </head>
@@ -83,6 +87,7 @@ ul#songList li.fail label{color:var(--bad)}
     <label>Szünet két dal letöltése között (másodperc)</label>
     <input id="sDelay" type="number" min="0.5" max="10" step="0.5">
     <button id="setSave" class="primary wide">Mentés</button>
+    <button id="setRules" class="ghost wide">Megtanult oldalak törlése</button>
     <div class="hint" id="setInfo"></div>
   </section>
 
@@ -106,7 +111,15 @@ ul#songList li.fail label{color:var(--bad)}
     <div class="row small"><button id="eTranslit" class="ghost">Cirill → Latin</button><button id="eClean" class="ghost">Sorok rendezése</button></div>
     <div id="eFile" class="hint"></div>
     <button id="eSave" class="primary wide">Mentés TXT-be</button>
+    <button id="ePick" class="ghost wide hidden">Nem jó a szöveg? Kiválasztom a helyes részt</button>
     <button id="eToList" class="ghost wide hidden">Előadó dallistája</button>
+  </section>
+
+  <!-- Szövegrész kiválasztása (megtanítás) -->
+  <section id="secPick" class="card hidden">
+    <div class="edit-head"><b>Melyik a dalszöveg?</b><button id="pickClose" class="icon">✕</button></div>
+    <div class="hint">Koppints arra a részre, amelyik csak a dalszöveg. Az app megjegyzi ezt az oldalra, és a további dalokat (a tömeges letöltést is) már így olvassa.</div>
+    <div id="pickList"></div>
   </section>
 
   <!-- Előadó / dallista -->
@@ -365,30 +378,63 @@ function linkRatio(el){
   return l / all;
 }
 
-function extractLyrics(doc){
-  const body = doc.body; if (!body) return { text: '', lines: 0 };
-  const total = (body.textContent || '').length || 1;
-  const bigEnough = e => (e.textContent || '').length >= total * 0.5;   // ha a fél oldalt tartalmazza, nem töröljük
-
-  // 1) Kifejezetten dalszövegnek jelölt elemek (pl. <p class="lyric">) – ezek elsőbbséget kapnak
+function sigOf(el){
+  if (!el || !el.tagName) return '';
+  if (el.id && !/\d{3,}/.test(el.id)) return '#' + CSS.escape(el.id);
+  const cls = (typeof el.className === 'string' ? el.className : '').trim().split(/\s+/).filter(c => c && !/\d{3,}/.test(c));
+  if (cls.length) return el.tagName.toLowerCase() + cls.map(c => '.' + CSS.escape(c)).join('');
+  const par = el.parentElement;
+  if (par && par.tagName !== 'BODY' && par.tagName !== 'HTML') return sigOf(par) + ' > ' + el.tagName.toLowerCase();
+  return el.tagName.toLowerCase();
+}
+function getRules(){ try { return JSON.parse(A.getPref('rules', '{}') || '{}'); } catch(e){ return {}; } }
+function setRule(host, sig){ const r = getRules(); if (sig) r[host] = sig; else delete r[host]; A.setPref('rules', JSON.stringify(r)); }
+function textOfAll(els){
+  const top = els.filter(e => !els.some(o => o !== e && o.contains(e)));
+  return finishText(top.map(nodeToText).join('\n\n'));
+}
+function lyricMarked(body){
   const marked = [...body.querySelectorAll(LYRIC_SEL)].filter(e =>
     !/^(H[1-6]|A|UL|OL|SCRIPT|STYLE|FORM|INPUT|TEXTAREA|BUTTON|IMG)$/.test(e.tagName) &&
     !/(capt|title|naslov|summary|opis|comment|komentar|related|share|count|info|meta|author|autor|video)/i.test((e.id || '') + ' ' + (typeof e.className === 'string' ? e.className : '')) &&
     clean(e.textContent).length >= 40 && lineCount(e) >= 3 && linkRatio(e) < 0.25);
-  const topMarked = marked.filter(e => !marked.some(o => o !== e && o.contains(e)));
-  if (topMarked.length){
-    const r = finishText(topMarked.map(nodeToText).join('\n\n'));
-    if (r.lines >= 3) return r;
-  }
+  return marked.filter(e => !marked.some(o => o !== e && e.contains(o)) &&
+    !e.querySelector('h1,h2,h3,ul,ol,table,form,nav,iframe') && clean(e.textContent).length < 6000);
+}
 
-  // 2) Általános keresés: a legtöbb rövid sort tartalmazó blokk
+// A kiválasztó listához: az oldal szöveges blokkjai, a legvalószínűbbel kezdve
+function lyricCandidates(html, url){
+  const doc = parseDoc(html, url), body = doc.body; if (!body) return [];
+  const out = [], seen = new Set();
+  const add = (sig, els) => {
+    if (!sig) return;
+    const r = textOfAll(els);
+    if (r.lines < 2 || r.lines > 300) return;
+    const key = r.text.slice(0, 200);
+    if (seen.has(key)) return; seen.add(key);
+    out.push({ sig, text: r.text, lines: r.lines });
+  };
+  const groups = new Map();
+  for (const e of lyricMarked(body)){ const g = sigOf(e); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(e); }
+  for (const [g, els] of groups) add(g, els);
+  for (const { el } of scoreBlocks(doc).slice(0, 12)){
+    const g = sigOf(el);
+    let els = [el];
+    try { const all = [...doc.querySelectorAll(g)]; if (all.length > 1 && all.length < 40) els = all; } catch(e){}
+    add(g, els);
+  }
+  return out.slice(0, 10);
+}
+
+function scoreBlocks(doc){
+  const body = doc.body; const total = (body.textContent || '').length || 1;
+  const bigEnough = e => (e.textContent || '').length >= total * 0.5;
   doc.querySelectorAll(REMOVE_SEL).forEach(e => { if (!bigEnough(e)) e.remove(); });
   doc.querySelectorAll(JUNK_SEL).forEach(e => {
     if (e === body || e === doc.documentElement || e.tagName === 'MAIN') return;
     if (!bigEnough(e)) e.remove();
   });
-
-  let best = null, bestScore = 0;
+  const res = [];
   for (const el of body.querySelectorAll('*')){
     if (/^(A|UL|OL|FORM|SCRIPT|STYLE)$/.test(el.tagName)) continue;
     let brs = 0, lines = 0, textLen = 0, linkLen = 0;
@@ -408,8 +454,44 @@ function extractLyrics(doc){
     if (el.tagName === 'PRE') score += 25;
     const cls = (el.id || '') + ' ' + (typeof el.className === 'string' ? el.className : '');
     if (KW.test(cls)) score *= 1.4;
-    if (score > bestScore){ bestScore = score; best = el; }
+    res.push({ el, score });
   }
+  res.sort((a, b) => b.score - a.score);
+  return res;
+}
+
+function extractLyrics(doc){
+  const body = doc.body; if (!body) return { text: '', lines: 0 };
+  // 0) Erre az oldalra megtanított rész
+  const rule = getRules()[hostOf(doc.__base)];
+  if (rule){
+    try {
+      const els = [...doc.querySelectorAll(rule)];
+      if (els.length){ const r = textOfAll(els); if (r.lines >= 2){ r.ruled = true; return r; } }
+    } catch(e){}
+  }
+
+  // 1) Kifejezetten dalszövegnek jelölt elemek (pl. <p class="lyric">) – a legbelsők
+  const leaves = lyricMarked(body);
+  if (leaves.length){
+    const groups = new Map();
+    for (const e of leaves){
+      const k = e.tagName + '|' + (typeof e.className === 'string' ? e.className : '');
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(e);
+    }
+    let bestG = null, bestLen = 0;
+    for (const g of groups.values()){
+      const len = g.reduce((n, e) => n + clean(e.textContent).length, 0);
+      if (len > bestLen){ bestLen = len; bestG = g; }
+    }
+    const r = finishText(bestG.map(nodeToText).join('\n\n'));
+    if (r.lines >= 3 && r.lines < 250) return r;
+  }
+
+  // 2) Általános keresés: a legtöbb rövid sort tartalmazó blokk
+  const scored = scoreBlocks(doc);
+  let best = scored.length ? scored[0].el : null;
   if (!best) return { text: '', lines: 0 };
 
   // Ha a szöveg versszakonként külön <p>/<div>-ben van, a közös szülőt vesszük
@@ -451,6 +533,7 @@ function openEditor({ heading, artist, title, text, source, url, canList }){
   $('eTitle').value = title || '';
   $('eText').value = text || '';
   show('eToList', !!canList);
+  show('ePick', !!url);
   show('secEdit', true); show('secHelp', false);
   updateFileHint();
   $('secEdit').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -484,6 +567,7 @@ window.onIncomingShare = (text, subject) => {
 };
 window.onBack = () => {
   if (!$('secSettings').classList.contains('hidden')){ show('secSettings', false); return true; }
+  if (!$('secPick').classList.contains('hidden')){ show('secPick', false); show('secEdit', true); return true; }
   if (QUICK) return false;
   if (!$('secEdit').classList.contains('hidden')){ closeEditor(); return true; }
   if (running){ cancelFlag = true; return true; }
@@ -503,7 +587,7 @@ async function loadUrl(){
     const title = pageTitle(doc);
     const links = getSongLinks(doc, r.url);
     const lyr = extractLyrics(parseDoc(r.html, r.url));
-    if (lyr.lines >= 6){
+    if (lyr.ruled || lyr.lines >= 6 || (lyr.lines >= 2 && links.length < 2)){
       // Ez egy dal oldala
       let artist = '', t = title;
       const parts = title.split(/\s+[-–—]\s+/);
@@ -593,6 +677,7 @@ async function previewSong(i){
     const lyr = extractLyrics(parseDoc(r.html, r.url));
     setStatus('');
     openEditor({ heading: 'Előnézet', artist: $('artist').value, title: s.title, text: lyr.text || '(Nem találtam szöveget ezen az oldalon.)', source: 'song', url: s.url });
+    editCtx.pageHtml = r.html; editCtx.pageUrl = r.url;
   } catch(e){ setStatus('Hiba: ' + e.message, true); }
 }
 
@@ -675,6 +760,34 @@ $('eToList').onclick = () => {
   showArtist(artist, links, editCtx.pageUrl);
   setStatus(links.length + ' további dalt találtam ezen az oldalon.');
 };
+
+// Szövegrész kiválasztása
+$('ePick').onclick = async () => {
+  if (!editCtx) return;
+  try {
+    if (!editCtx.pageHtml){ const r = await fetchPage(editCtx.url); editCtx.pageHtml = r.html; editCtx.pageUrl = r.url; }
+    const cands = lyricCandidates(editCtx.pageHtml, editCtx.pageUrl);
+    const box = $('pickList'); box.innerHTML = '';
+    if (!cands.length){ box.innerHTML = '<div class="hint">Nem találtam szöveges részt az oldalon.</div>'; }
+    cands.forEach(c => {
+      const d = document.createElement('div'); d.className = 'cand';
+      const pre = document.createElement('pre'); pre.textContent = c.text.split('\n').slice(0, 9).join('\n');
+      const m = document.createElement('div'); m.className = 'meta'; m.textContent = c.lines + ' sor';
+      const b = document.createElement('button'); b.className = 'primary'; b.textContent = 'Ez a dalszöveg';
+      b.onclick = () => {
+        setRule(hostOf(editCtx.pageUrl), c.sig);
+        $('eText').value = c.text;
+        show('secPick', false); show('secEdit', true);
+        $('secEdit').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        toast('Megjegyeztem: ' + hostOf(editCtx.pageUrl));
+      };
+      d.append(pre, m, b); box.appendChild(d);
+    });
+    show('secEdit', false); show('secPick', true); window.scrollTo(0, 0);
+  } catch(e){ toast('Hiba: ' + e.message); }
+};
+$('pickClose').onclick = () => { show('secPick', false); show('secEdit', true); };
+$('setRules').onclick = () => { A.setPref('rules', '{}'); toast('Megtanult oldalak törölve'); };
 
 // Beállítások
 $('btnSettings').onclick = () => {
