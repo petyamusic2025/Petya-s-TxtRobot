@@ -47,6 +47,11 @@ ul#songList li input{width:20px;height:20px;flex:none}
 ul#songList li .peek{background:transparent;color:var(--brand2);font-size:13px;padding:8px 12px}
 ul#songList li.done label{color:var(--ok)}
 ul#songList li.fail label{color:var(--bad)}
+ul#songList li.grp{background:#eef0f7;position:sticky;top:0;z-index:1;padding:6px 8px;gap:6px}
+ul#songList li.grp .tog{background:transparent;color:var(--brand);font-size:16px;padding:4px 6px}
+ul#songList li.grp input{flex:1;min-width:0;padding:6px 8px;font-weight:600;background:#fff}
+ul#songList li.grp .gb{background:#fff;color:var(--brand);font-size:12px;padding:6px 8px}
+ul#songList li.grp .gc{font-size:12px;color:var(--muted);white-space:nowrap}
 .bar{height:8px;background:#eef0f7;border-radius:8px;overflow:hidden;margin-top:12px}
 .bar>div{height:100%;width:0;background:var(--brand2);transition:width .2s}
 .log{font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;max-height:30vh;overflow:auto;margin-top:8px;color:var(--muted);white-space:pre-wrap}
@@ -120,8 +125,8 @@ ul#songList li.fail label{color:var(--bad)}
 
   <!-- Előadó / dallista -->
   <section id="secArtist" class="card hidden">
-    <label>Előadó (mappa és fájlnév)</label>
-    <input id="artist" type="text">
+    <div class="edit-head"><b id="artHead">Dallista</b><button id="btnClear" class="ghost" style="padding:6px 12px;font-size:13px">Lista ürítése</button></div>
+    <div class="hint" style="margin-top:4px">Több előadót is felvehetsz: oszd meg vagy másold be a következő előadó linkjét, és hozzáadódik ehhez a listához.</div>
     <div class="row"><input id="filter" type="text" placeholder="Keresés a listában…"></div>
     <div class="row small"><button id="selAll" class="ghost">Mind</button><button id="selNone" class="ghost">Egyik sem</button><span id="count" class="grow right hint" style="margin:0"></span></div>
     <div id="pageInfo" class="hint"></div>
@@ -540,6 +545,7 @@ function songTitleFromLink(text, artist){
 let songs = [];            // {url, title, checked, state}
 let cancelFlag = false, running = false;
 let editCtx = null;        // {source:'text'|'song', url?}
+let groups = [];          // {name, url, open, removed}
 let lastArtistPageUrl = '';
 
 function toast(m){
@@ -615,14 +621,16 @@ async function loadUrl(){
       let artist = '', t = title;
       const parts = title.split(/\s+[-–—]\s+/);
       if (parts.length >= 2){ artist = parts[0]; t = parts.slice(1).join(' - '); }
-      if (lastArtistPageUrl && $('artist').value && !artist) artist = $('artist').value;
       setStatus('Dalszöveg megtalálva (' + lyr.lines + ' sor).');
       openEditor({ heading: 'Dalszöveg', artist, title: t, text: lyr.text, source: 'song', url: r.url, canList: links.length >= 5 ? { doc: null } : false });
       editCtx.pageHtml = r.html; editCtx.pageUrl = r.url; editCtx.pageTitle = title;
     } else if (links.length >= 2){
-      showArtist(title, links, r.url);
-      setStatus(links.length + ' dalt találtam. Pipáld ki, amelyik kell.');
-      crawlMorePages(doc, r.url);
+      const before = groups.filter(g => !g.removed).length;
+      const gi = showArtist(title, links, r.url);
+      const now = groups.filter(g => !g.removed).length;
+      if (now > before) setStatus(title + ': ' + links.length + ' dal' + (now > 1 ? ' hozzáadva (' + now + ' előadó a listában).' : '. Pipáld ki, amelyik kell.'));
+      $('url').value = '';
+      crawlMorePages(doc, r.url, gi);
     } else {
       setStatus('Ezen az oldalon nem találtam se dalszöveget, se dallistát.', true);
     }
@@ -635,22 +643,34 @@ async function loadUrl(){
 
 function showArtist(title, links, pageUrl){
   lastArtistPageUrl = pageUrl;
-  $('artist').value = title;
-  songs = links.map(l => ({ url: l.url, title: songTitleFromLink(l.text, title), checked: false, state: '' }));
+  const existing = groups.findIndex(g => !g.removed && strip(g.url) === strip(pageUrl));
+  let gi;
+  if (existing >= 0){
+    gi = existing; groups[gi].open = true;
+    setStatus('Ez az előadó már a listában van.');
+  } else {
+    groups.push({ name: title, url: pageUrl, open: true, removed: false });
+    gi = groups.length - 1;
+    groups.forEach((g, k) => { if (k !== gi) g.open = false; });   // a régebbiek összecsukva, hogy átlátható maradjon
+    const known = new Set(songs.map(x => x.url));
+    for (const l of links) if (!known.has(l.url)){ songs.push({ url: l.url, title: songTitleFromLink(l.text, title), checked: false, state: '', g: gi }); known.add(l.url); }
+  }
   $('filter').value = '';
   $('pageInfo').textContent = '';
-  show('secArtist', true); show('secHelp', false); show('progressBox', false);
+  show('secArtist', true); show('secHelp', false);
+  if (!running) show('progressBox', false);
   closeEditor(); show('secHelp', false);
   renderList();
+  return gi;
 }
 
-async function crawlMorePages(firstDoc, firstUrl){
+async function crawlMorePages(firstDoc, firstUrl, gi){
   const seen = new Set([strip(firstUrl)]);
   const queue = getPageLinks(firstDoc, firstUrl).filter(u => !seen.has(strip(u)));
   let pages = 1;
-  while (queue.length && pages < 30 && lastArtistPageUrl === firstUrl){
+  while (queue.length && pages < 30 && groups[gi] && !groups[gi].removed){
     const u = queue.shift(); if (seen.has(strip(u))) continue; seen.add(strip(u));
-    $('pageInfo').textContent = 'További oldalak betöltése… (' + (pages + 1) + '. oldal)';
+    $('pageInfo').textContent = groups[gi].name + ': további oldalak betöltése… (' + (pages + 1) + '. oldal)';
     try {
       await sleep(800);
       const r = await fetchPage(u);
@@ -658,38 +678,80 @@ async function crawlMorePages(firstDoc, firstUrl){
       const known = new Set(songs.map(s => s.url));
       let added = 0;
       for (const l of getSongLinks(d, firstUrl)){
-        if (!known.has(l.url)){ songs.push({ url: l.url, title: songTitleFromLink(l.text, $('artist').value), checked: false, state: '' }); known.add(l.url); added++; }
+        if (!known.has(l.url)){ songs.push({ url: l.url, title: songTitleFromLink(l.text, groups[gi].name), checked: false, state: '', g: gi }); known.add(l.url); added++; }
       }
       for (const n of getPageLinks(d, r.url)) if (!seen.has(strip(n))) queue.push(n);
       pages++;
       if (added) renderList();
     } catch(e){ break; }
   }
-  $('pageInfo').textContent = pages > 1 ? (pages + ' oldalt olvastam be.') : '';
+  $('pageInfo').textContent = '';
 }
 
 function renderList(){
   const f = clean($('filter').value).toLowerCase();
   const ul = $('songList'); ul.innerHTML = '';
-  songs.forEach((s, i) => {
-    if (f && !s.title.toLowerCase().includes(f)) return;
-    const li = document.createElement('li'); if (s.state) li.className = s.state;
-    const lab = document.createElement('label');
-    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = s.checked;
-    cb.onchange = () => { s.checked = cb.checked; updateCount(); };
-    const sp = document.createElement('span'); sp.textContent = (s.state === 'done' ? '✓ ' : s.state === 'fail' ? '✗ ' : '') + s.title;
-    lab.append(cb, sp);
-    const pk = document.createElement('button'); pk.className = 'peek'; pk.textContent = 'Előnézet';
-    pk.onclick = () => previewSong(i);
-    li.append(lab, pk); ul.appendChild(li);
+  groups.forEach((g, gi) => {
+    if (g.removed) return;
+    const gs = songs.filter(s => s.g === gi);
+    const sel = gs.filter(s => s.checked).length;
+    const open = g.open || !!f;
+    const h = document.createElement('li'); h.className = 'grp';
+    const tog = document.createElement('button'); tog.className = 'tog'; tog.textContent = open ? '▾' : '▸';
+    tog.onclick = () => { g.open = !g.open; renderList(); };
+    const name = document.createElement('input'); name.type = 'text'; name.value = g.name; name.title = 'Előadó neve (mappa és fájlnév)';
+    name.oninput = () => { g.name = name.value; };
+    const cnt = document.createElement('span'); cnt.className = 'gc'; cnt.textContent = sel + '/' + gs.length;
+    const all = document.createElement('button'); all.className = 'gb'; all.textContent = sel === gs.length && gs.length ? 'Egyik sem' : 'Mind';
+    all.onclick = () => { const on = !(sel === gs.length); gs.forEach(s => { if (!f || s.title.toLowerCase().includes(f)) s.checked = on; }); renderList(); };
+    const del = document.createElement('button'); del.className = 'gb'; del.textContent = '✕'; del.title = 'Előadó eltávolítása';
+    del.onclick = () => { if (running) return; g.removed = true; songs.forEach(s => { if (s.g === gi) s.checked = false; }); if (!groups.some(x => !x.removed)) clearList(); else renderList(); };
+    h.append(tog, name, cnt, all, del); ul.appendChild(h);
+    if (!open) return;
+    songs.forEach((s, i) => {
+      if (s.g !== gi) return;
+      if (f && !s.title.toLowerCase().includes(f)) return;
+      const li = document.createElement('li'); if (s.state) li.className = s.state;
+      const lab = document.createElement('label');
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = s.checked;
+      cb.onchange = () => { s.checked = cb.checked; renderCounts(); };
+      const sp = document.createElement('span'); sp.textContent = (s.state === 'done' ? '✓ ' : s.state === 'fail' ? '✗ ' : '') + s.title;
+      lab.append(cb, sp);
+      const pk = document.createElement('button'); pk.className = 'peek'; pk.textContent = 'Előnézet';
+      pk.onclick = () => previewSong(i);
+      li.append(lab, pk); ul.appendChild(li);
+    });
   });
   updateCount();
 }
+function renderCounts(){
+  // csak a számlálók frissítése, hogy görgetés közben ne ugráljon a lista
+  const heads = $('songList').querySelectorAll('li.grp');
+  let k = 0;
+  groups.forEach((g, gi) => {
+    if (g.removed) return;
+    const gs = songs.filter(s => s.g === gi), sel = gs.filter(s => s.checked).length;
+    const h = heads[k++]; if (!h) return;
+    h.querySelector('.gc').textContent = sel + '/' + gs.length;
+    h.querySelectorAll('.gb')[0].textContent = sel === gs.length && gs.length ? 'Egyik sem' : 'Mind';
+  });
+  updateCount();
+}
+function activeSongs(){ return songs.filter(s => groups[s.g] && !groups[s.g].removed); }
 function updateCount(){
-  const n = songs.filter(s => s.checked).length;
-  $('count').textContent = n + ' / ' + songs.length + ' kijelölve';
+  const act = activeSongs(), n = act.filter(s => s.checked).length;
+  const ng = groups.filter(g => !g.removed).length;
+  $('artHead').textContent = ng > 1 ? ng + ' előadó dallistája' : 'Dallista';
+  $('count').textContent = n + ' / ' + act.length + ' kijelölve';
   $('btnDownload').textContent = n ? 'Letöltés (' + n + ' dal)' : 'Letöltés';
   $('btnDownload').disabled = !n || running;
+}
+function clearList(){
+  if (running) return;
+  groups = []; songs = []; lastArtistPageUrl = '';
+  show('secArtist', false); show('progressBox', false);
+  show('secHelp', !QUICK && $('secEdit').classList.contains('hidden'));
+  setStatus('');
 }
 
 async function previewSong(i){
@@ -699,16 +761,15 @@ async function previewSong(i){
     const r = await fetchPage(s.url);
     const lyr = extractLyrics(parseDoc(r.html, r.url));
     setStatus('');
-    openEditor({ heading: 'Előnézet', artist: $('artist').value, title: s.title, text: lyr.text || '(Nem találtam szöveget ezen az oldalon.)', source: 'song', url: s.url });
+    openEditor({ heading: 'Előnézet', artist: groups[s.g] ? clean(groups[s.g].name) : '', title: s.title, text: lyr.text || '(Nem találtam szöveget ezen az oldalon.)', source: 'song', url: s.url });
     editCtx.pageHtml = r.html; editCtx.pageUrl = r.url;
   } catch(e){ setStatus('Hiba: ' + e.message, true); }
 }
 
 async function runDownload(){
-  const list = songs.filter(s => s.checked);
+  const list = activeSongs().filter(s => s.checked);
   if (!list.length) return;
-  const artist = clean($('artist').value);
-  A.setPref('lastArtist', artist);
+  const folders = new Set();
   running = true; cancelFlag = false; updateCount();
   show('progressBox', true); $('log').textContent = '';
   let ok = 0, skip = 0, fail = 0, i = 0, lastPath = '';
@@ -716,7 +777,8 @@ async function runDownload(){
   for (const s of list){
     if (cancelFlag) break;
     i++;
-    $('progText').textContent = i + ' / ' + list.length + ' – ' + s.title;
+    const artist = clean(groups[s.g].name);
+    $('progText').textContent = i + ' / ' + list.length + ' – ' + (artist ? artist + ': ' : '') + s.title;
     $('bar').style.width = Math.round((i - 1) / list.length * 100) + '%';
     const name = fileNameFor(artist, s.title);
     if ($('skipExisting').checked && A.fileExists(subFor(artist), name)){
@@ -728,7 +790,7 @@ async function runDownload(){
       const lyr = extractLyrics(parseDoc(r.html, r.url));
       if (!lyr.text || lyr.lines < 2) throw new Error('nem találtam szöveget');
       lastPath = saveOne(artist, s.title, lyr.text);
-      ok++; s.state = 'done'; s.checked = false; log('✓ ' + s.title);
+      ok++; s.state = 'done'; s.checked = false; folders.add(subFor(artist)); log('✓ ' + (artist ? artist + ' – ' : '') + s.title);
     } catch(e){
       fail++; s.state = 'fail'; log('✗ ' + s.title + ' – ' + e.message);
     }
@@ -736,7 +798,8 @@ async function runDownload(){
     if (i < list.length && !cancelFlag) await sleep(Math.max(0.5, +S.delay || 1.5) * 1000);
   }
   $('bar').style.width = '100%';
-  const where = 'Documents/' + S.baseFolder + (subFor(artist) ? '/' + subFor(artist) : '');
+  const fl = [...folders].filter(Boolean);
+  const where = 'Documents/' + S.baseFolder + (fl.length === 1 ? '/' + fl[0] : fl.length > 1 ? ' (' + fl.length + ' előadó mappája)' : '');
   $('progText').textContent = (cancelFlag ? 'Leállítva. ' : 'Kész! ') + ok + ' mentve' + (skip ? ', ' + skip + ' kihagyva' : '') + (fail ? ', ' + fail + ' hiba' : '') + '.\nHely: ' + where;
   running = false; renderList();
   toast(ok + ' dalszöveg mentve');
@@ -751,11 +814,11 @@ $('btnPaste').onclick = () => {
   else toast('A vágólap üres');
 };
 $('filter').oninput = renderList;
-$('selAll').onclick = () => { const f = clean($('filter').value).toLowerCase(); songs.forEach(s => { if (!f || s.title.toLowerCase().includes(f)) s.checked = true; }); renderList(); };
+$('selAll').onclick = () => { const f = clean($('filter').value).toLowerCase(); activeSongs().forEach(s => { if (!f || s.title.toLowerCase().includes(f)) s.checked = true; }); renderList(); };
 $('selNone').onclick = () => { songs.forEach(s => s.checked = false); renderList(); };
+$('btnClear').onclick = clearList;
 $('btnDownload').onclick = runDownload;
 $('btnCancel').onclick = () => { cancelFlag = true; };
-$('artist').oninput = () => {};
 
 $('editClose').onclick = () => { if (QUICK) A.close(); else closeEditor(); };
 $('eArtist').oninput = updateFileHint;
