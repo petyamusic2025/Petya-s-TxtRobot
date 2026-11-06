@@ -352,12 +352,25 @@ const JUNK_SEL = '[class*="comment" i],[id*="comment" i],[class*="komentar" i],[
 const KW = /(lyric|tekst|text|pesm|pjesm|song|stih|szoveg|szöveg|content|entry|body)/i;
 const JUNK_LINE = /^(tekst pesme|tekst pjesme|reklama|advertisement|sponzorisano|oglas|ads?|lyrics|podeli|podijeli|share|print|štampaj|stampaj|komentari?|ocena|ocjena|pregleda:?\s*\d*|\(\s*\)|ucitavanje|učitavanje)\.?:?$/i;
 
+// Ha a szöveg sima sortörésekkel van az oldalon (CSS white-space: pre-line), a sortöréseket megtartjuk
+const INNER_NL = /\S[ \t]*\r?\n[\s]*\S/;
+function textNodeOut(t){
+  if (INNER_NL.test(t)){
+    return t.replace(/^\s+/, ' ').replace(/\s+$/, ' ')
+            .replace(/\r\n?/g, '\n').replace(/[ \t]+/g, ' ')
+            .replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n');
+  }
+  return t.replace(/[\t\r\n ]+/g, ' ');
+}
+function textNodeLines(t){
+  return INNER_NL.test(t) ? t.split(/\r?\n/).filter(l => l.trim()).length : (t.trim() ? 1 : 0);
+}
 function nodeToText(el){
   let out = '';
   const BLOCK = /^(P|DIV|LI|H[1-6]|TR|SECTION|ARTICLE|BLOCKQUOTE|PRE|TABLE|DL|DD|DT)$/;
   (function walk(n){
     for (const c of n.childNodes){
-      if (c.nodeType === 3) out += c.textContent.replace(/[\t\r\n ]+/g, ' ');
+      if (c.nodeType === 3) out += textNodeOut(c.textContent);
       else if (c.nodeType === 1){
         if (c.nodeName === 'BR'){ out += '\n'; continue; }
         if (/^(H[1-6]|SCRIPT|STYLE|BUTTON|FORM|SELECT|INPUT|TEXTAREA|IMG|IFRAME|INS|SVG)$/.test(c.nodeName)) continue;
@@ -377,7 +390,10 @@ function finishText(raw){
 }
 const LYRIC_SEL = '.lyric,.lyrics,#lyric,#lyrics,.song-lyrics,.songtext,[class*="lyric" i],[id*="lyric" i],[class*="tekst" i],[id*="tekst" i],[class*="songtext" i],[class*="stihovi" i]';
 function lineCount(el){
-  return el.querySelectorAll('br').length + el.querySelectorAll('p,div,li').length + 1;
+  let nl = 0;
+  const w = el.ownerDocument.createTreeWalker(el, 4);
+  while (w.nextNode()) nl += Math.max(0, textNodeLines(w.currentNode.textContent) - 1);
+  return el.querySelectorAll('br').length + el.querySelectorAll('p,div,li').length + 1 + nl;
 }
 function linkRatio(el){
   const all = clean(el.textContent).length || 1;
@@ -446,13 +462,13 @@ function scoreBlocks(doc){
     if (/^(A|UL|OL|FORM|SCRIPT|STYLE)$/.test(el.tagName)) continue;
     let brs = 0, lines = 0, textLen = 0, linkLen = 0;
     for (const n of el.childNodes){
-      if (n.nodeType === 3){ const t = n.textContent.trim(); if (t){ textLen += t.length; lines++; } }
+      if (n.nodeType === 3){ const t = n.textContent.trim(); if (t){ textLen += t.length; lines += textNodeLines(n.textContent); } }
       else if (n.nodeName === 'BR') brs++;
       else if (n.nodeName === 'A') linkLen += clean(n.textContent).length;
       else if (/^(P|SPAN|B|I|EM|STRONG|FONT|DIV|U|SMALL)$/.test(n.nodeName)){
         const t = clean(n.textContent);
-        if (t && t.length < 600 && !n.querySelector('a,ul,ol,table,h1,h2,h3')){
-          textLen += t.length; lines += 1 + n.querySelectorAll('br').length;
+        if (t && t.length < 1500 && !n.querySelector('a,ul,ol,table,h1,h2,h3')){
+          textLen += t.length; lines += Math.max(1 + n.querySelectorAll('br').length, lineCount(n) - n.querySelectorAll('p,div,li').length);
         }
       }
     }
@@ -474,7 +490,7 @@ function extractLyrics(doc){
   if (rule){
     try {
       const els = [...doc.querySelectorAll(rule)];
-      if (els.length){ const r = textOfAll(els); if (r.lines >= 2){ r.ruled = true; return r; } }
+      if (els.length){ const r = textOfAll(els); if (r.lines >= 3){ r.ruled = true; return r; } }
     } catch(e){}
   }
 
@@ -870,6 +886,8 @@ $('setSave').onclick = () => {
 
 // Indulás
 (function init(){
+  // A régi verzió hibásan tanult szabályai (sortörés nélkül) törlődnek
+  if (A.getPref('rulesVer', '') !== '2'){ A.setPref('rules', '{}'); A.setPref('rulesVer', '2'); }
   const v = A.version(); if (v) $('ver').textContent = 'Dalszöveg → TXT · v' + v;
   $('whereInfo').textContent = 'Documents/' + S.baseFolder + (S.subfolder ? '/<Előadó>' : '');
   if (QUICK){ show('secLink', false); show('secHelp', false); }
